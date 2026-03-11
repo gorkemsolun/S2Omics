@@ -6,7 +6,7 @@ from tqdm import tqdm
 import cv2
 import math
 from ..s1_utils import (
-        load_image, load_pickle, save_pickle, setup_seed)
+        load_image, load_pickle, save_pickle, setup_seed, get_image_filename)
 
 def euclid_distance(point1, point2):
     tmp = np.array(point1)-np.array(point2)
@@ -246,7 +246,7 @@ def roi_selection_for_single_section(prefix, save_folder,
         os.makedirs(save_folder+f'roi_selection_detailed_output/circle_roi_size_{roi_size[0]}_{roi_size[1]}')
     roi_save_folder = save_folder+f'roi_selection_detailed_output/circle_roi_size_{roi_size[0]}_{roi_size[1]}/'
     
-    he = load_image(f'{prefix}he.jpg')
+    he = load_image(get_image_filename(f'{prefix}he'))
     shapes = load_pickle(pickle_folder+'shapes.pickle')
     image_shape = shapes['tiles']
     dpi = 1200

@@ -7,19 +7,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from .s1_utils import (
-        crop_image, load_image, save_image, 
+        crop_image, load_image, save_image, get_image_filename,
         read_string, write_string)
-
-def get_image_filename(prefix):
-    file_exists = False
-    for suffix in ['.jpg', '.png', '.ome.tif', '.tiff', '.tif', '.svs']:
-        filename = prefix + suffix
-        if os.path.exists(filename):
-            file_exists = True
-            break
-    if not file_exists:
-        raise FileNotFoundError('Image not found')
-    return filename
 
 def rescale_image(img, scale):
     if img.ndim == 2:
@@ -58,11 +47,11 @@ def histology_preprocess(prefix, show_image=False):
     img = rescale_image(img, scale)
     print(int(time() - t0), 'sec')
     img = img.astype(np.uint8)
-    save_image(img, prefix+'he-scaled.jpg')
+    save_image(img, prefix+'he-scaled.tiff')
 
     pad = 256
     img = adjust_margins(img, pad=pad, pad_value=255)
-    save_image(img, f'{prefix}he.jpg')
+    save_image(img, f'{prefix}he.tiff')
     print('Preprocessed H&E image saved!')
 
     if show_image:

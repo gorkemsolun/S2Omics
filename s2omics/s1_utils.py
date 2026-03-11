@@ -15,6 +15,11 @@ import random
 
 Image.MAX_IMAGE_PIXELS = None
 
+
+def _is_tiff(filename):
+    lower = filename.lower()
+    return lower.endswith('.tif') or lower.endswith('.tiff') or lower.endswith('.ome.tif')
+
 def crop_image(img, extent, mode='edge', constant_values=None):
     extent = np.array(extent)
     pad = np.zeros((img.ndim, 2), dtype=int)
@@ -48,7 +53,7 @@ def mkdir(path):
 
 
 def load_image(filename, verbose=True):
-    if filename.endswith("tif"):
+    if _is_tiff(filename):
         img = tifffile.imread(filename)
         return img
     img = Image.open(filename)
@@ -67,9 +72,20 @@ def load_mask(filename, verbose=True):
     return mask
 
 
+def get_image_filename(prefix):
+    for suffix in ['.tiff', '.tif', '.ome.tif', '.png', '.svs']:
+        filename = prefix + suffix
+        if os.path.exists(filename):
+            return filename
+    raise FileNotFoundError(f'Image not found for prefix: {prefix}')
+
+
 def save_image(img, filename):
     mkdir(filename)
-    Image.fromarray(img).save(filename, quality=95)
+    if _is_tiff(filename.lower()):
+        tifffile.imwrite(filename, img)
+    else:
+        Image.fromarray(img).save(filename)
     print(filename)
 
 

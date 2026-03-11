@@ -68,7 +68,7 @@ def superpixel_quality_control(prefix, save_folder,
         os.makedirs(save_folder+'pickle_files')
     pickle_folder = save_folder+'pickle_files/'
     
-    image = load_image(prefix+'he.jpg')
+    image = load_image(get_image_filename(prefix+'he'))
     _,shapes,_ = patchify(image, patch_size)
     # save shapes parameter to pickle folder
     save_pickle(shapes, pickle_folder+'shapes.pickle')

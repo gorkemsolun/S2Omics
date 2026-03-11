@@ -12,6 +12,40 @@ import argparse
 from torch.utils.data import Dataset, DataLoader
 from typing import Any, Callable, Dict, Optional, Set, Tuple, Type, Union, List
 
+
+def _resolve_device(requested_device: str):
+    requested = torch.device(requested_device)
+
+    if requested.type != 'cuda':
+        return requested, None
+
+    if not torch.cuda.is_available():
+        return torch.device('cpu'), 'CUDA not available in this environment.'
+
+    try:
+        dev_idx = requested.index if requested.index is not None else torch.cuda.current_device()
+        capability = torch.cuda.get_device_capability(dev_idx)
+        arch = f"sm_{capability[0]}{capability[1]}"
+        supported_arches = set(torch.cuda.get_arch_list())
+        if arch not in supported_arches:
+            return (
+                torch.device('cpu'),
+                f"CUDA device architecture '{arch}' is unsupported by this PyTorch build "
+                f"(supports: {sorted(supported_arches)})."
+            )
+    except Exception as exc:
+        return torch.device('cpu'), f"Failed to validate CUDA device: {exc}"
+
+    return requested, None
+
+
+def _resolve_image_path(prefix: str, base_name: str) -> str:
+    for suffix in ('.jpg', '.png', '.ome.tif', '.tiff', '.tif', '.svs'):
+        candidate = f"{prefix}{base_name}{suffix}"
+        if os.path.exists(candidate):
+            return candidate
+    raise FileNotFoundError(f"Image not found for base '{base_name}' under '{prefix}'")
+
 class PatchDataset(Dataset):
     def __init__(self, image, patch_size=16, stride=16, model='uni'):
         self.image = image
@@ -67,7 +101,7 @@ def create_model_uni(local_dir):
         num_classes=0,  # This ensures no classification head
         global_pool='',  # This removes global pooling
     )
-    model.load_state_dict(torch.load(os.path.join(local_dir, "pytorch_model.bin"), map_location="cpu"), strict=False)
+    model.load_state_dict(torch.load(os.path.join(local_dir, "pytorch_model.bin"), map_location="cpu", weights_only=False), strict=False)
     return model
 
 def create_model_virchow(local_dir):
@@ -83,7 +117,7 @@ def create_model_virchow(local_dir):
         mlp_layer=SwiGLUPacked, 
         act_layer=torch.nn.SiLU
     )
-    model.load_state_dict(torch.load(os.path.join(local_dir, "pytorch_model.bin"), map_location="cpu"), strict=False)
+    model.load_state_dict(torch.load(os.path.join(local_dir, "pytorch_model.bin"), map_location="cpu", weights_only=False), strict=False)
     return model
 
 def create_model_gigapath(local_dir):
@@ -100,7 +134,7 @@ def create_model_gigapath(local_dir):
         num_classes=0,
         global_pool="token"
     )
-    model.load_state_dict(torch.load(os.path.join(local_dir, "pytorch_model.bin"), map_location="cpu"), strict=False)
+    model.load_state_dict(torch.load(os.path.join(local_dir, "pytorch_model.bin"), map_location="cpu", weights_only=False), strict=False)
     return model
 
 @torch.inference_mode()
@@ -149,15 +183,27 @@ def histology_feature_extraction(prefix, save_folder,
     elif foundation_model == 'gigapath':
         model = create_model_gigapath(local_dir)
     
-    device = torch.device(device)
-    model = model.to(device)
+    resolved_device, fallback_reason = _resolve_device(device)
+    if fallback_reason is not None:
+        print(f"[WARN] Falling back to CPU for feature extraction. Reason: {fallback_reason}")
+    device = resolved_device
+    try:
+        model = model.to(device)
+    except RuntimeError as exc:
+        msg = str(exc).lower()
+        if device.type == 'cuda' and 'cuda' in msg:
+            print(f"[WARN] Failed to move model to CUDA. Falling back to CPU. Reason: {exc}")
+            device = torch.device('cpu')
+            model = model.to(device)
+        else:
+            raise
     model.eval()
 
     print(f'''Histology foundation model loaded! 
     Foundation model name: {foundation_model}
     Start extracting histology feature embeddings...''')
     
-    he = load_image(f'{prefix}he.jpg')
+    he = load_image(_resolve_image_path(prefix, 'he'))
     if foundation_model == 'uni' or foundation_model == 'gigapath':
         stride_init = 16
         patch_size = 16
@@ -167,13 +213,38 @@ def histology_feature_extraction(prefix, save_folder,
         
     dataset = PatchDataset(he, patch_size=patch_size, stride=stride_init*down_samp_step, model=foundation_model)
     save_pickle(dataset.num_patches, pickle_folder+'num_patches.pickle')
-    dataloader = DataLoader(dataset, shuffle=False, batch_size=batch_size, num_workers=num_workers, pin_memory=True)
+    pin_memory = device.type == 'cuda'
+    dataloader = DataLoader(
+        dataset,
+        shuffle=False,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+    )
 
     patch_embeddings = []
     part_cnts = 0
     for batch_idx, (patches, positions) in enumerate(tqdm.tqdm(dataloader, total=len(dataloader))):
 
-        patches = patches.to(device, non_blocking=True)
+        try:
+            patches = patches.to(device, non_blocking=(device.type == 'cuda'))
+        except RuntimeError as exc:
+            msg = str(exc).lower()
+            cuda_runtime_failure = (
+                device.type == 'cuda' and (
+                    'no kernel image is available for execution on the device' in msg
+                    or 'cuda-capable device(s) is/are busy or unavailable' in msg
+                    or 'cuda error' in msg
+                )
+            )
+            if not cuda_runtime_failure:
+                raise
+
+            print(f"[WARN] CUDA transfer failure encountered. Falling back to CPU. Reason: {exc}")
+            torch.cuda.empty_cache()
+            device = torch.device('cpu')
+            model = model.to(device)
+            patches = patches.to(device)
         
         if batch_idx == 0:
             print(f"Batch {batch_idx}:")
@@ -182,7 +253,26 @@ def histology_feature_extraction(prefix, save_folder,
             print(f"Content of positions[0][:10]: {positions[0][:10]}")
             print(f"Content of positions[1][:10]: {positions[1][:10]}")
         
-        feature_emb, patch_emb = extract_features(model, patches)
+        try:
+            feature_emb, patch_emb = extract_features(model, patches)
+        except RuntimeError as exc:
+            msg = str(exc).lower()
+            cuda_runtime_failure = (
+                device.type == 'cuda' and (
+                    'no kernel image is available for execution on the device' in msg
+                    or 'cuda-capable device(s) is/are busy or unavailable' in msg
+                    or 'cuda error' in msg
+                )
+            )
+            if not cuda_runtime_failure:
+                raise
+
+            print(f"[WARN] CUDA runtime failure encountered. Falling back to CPU. Reason: {exc}")
+            torch.cuda.empty_cache()
+            device = torch.device('cpu')
+            model = model.to(device)
+            patches = patches.to(device)
+            feature_emb, patch_emb = extract_features(model, patches)
         
         if batch_idx == 0:
             print(f"Shape of feature_emb: {feature_emb.shape}")
