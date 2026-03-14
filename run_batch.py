@@ -9,12 +9,16 @@ from s2omics.p1_histology_preprocess import histology_preprocess
 from s2omics.p2_superpixel_quality_control import superpixel_quality_control
 from s2omics.p3_feature_extraction import histology_feature_extraction
 from s2omics.p0_ndpi_conversion import convert_ndpi_with_fallback
+from s2omics.single_section.p4_get_histology_segmentation import (
+    get_histology_segmentation,
+)
+from s2omics.single_section.p5_merge_over_clusters import merge_over_clusters
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
-            "Batch pipeline for NDPI -> TIFF + S2Omics steps 1-3. "
+            "Batch pipeline for NDPI -> TIFF + S2Omics steps 1-5. "
             "Designed for cluster usage across many images."
         )
     )
@@ -74,13 +78,43 @@ def parse_args():
         "--down-samp-step",
         type=int,
         default=10,
-        help="Down-sampling step used in step 3.",
+        help="Down-sampling step used in steps 3 and 4.",
     )
     parser.add_argument(
         "--num-workers",
         type=int,
         default=4,
         help="DataLoader workers in step 3.",
+    )
+    parser.add_argument(
+        "--clustering-method",
+        type=str,
+        default="kmeans",
+        choices=["kmeans", "fcm", "agglo", "bisect", "birch", "louvain", "leiden"],
+        help="Clustering method for step 4 histology segmentation.",
+    )
+    parser.add_argument(
+        "--n-clusters",
+        type=int,
+        default=20,
+        help="Initial number of clusters for step 4.",
+    )
+    parser.add_argument(
+        "--resolution",
+        type=float,
+        default=1.0,
+        help="Resolution for leiden/louvain in step 4.",
+    )
+    parser.add_argument(
+        "--if-evaluate",
+        action="store_true",
+        help="Compute clustering metrics in step 4.",
+    )
+    parser.add_argument(
+        "--target-n-clusters",
+        type=int,
+        default=15,
+        help="Target number of clusters for step 5 merge-over-clusters.",
     )
     parser.add_argument(
         "--show-image",
@@ -217,6 +251,25 @@ def process_one(ndpi_path, args):
         num_workers=args.num_workers,
     )
 
+    # Step 4
+    get_histology_segmentation(
+        prefix,
+        save_folder,
+        foundation_model=args.foundation_model,
+        down_samp_step=args.down_samp_step,
+        clustering_method=args.clustering_method,
+        n_clusters=args.n_clusters,
+        resolution=args.resolution,
+        if_evaluate=args.if_evaluate,
+    )
+
+    # Step 5
+    merge_over_clusters(
+        prefix,
+        save_folder,
+        target_n_clusters=args.target_n_clusters,
+    )
+
     print(f"[DONE]  {sample_name}")
 
 
@@ -237,6 +290,9 @@ def main():
     print(f"Output base directory: {os.path.abspath(args.work_dir)}")
     print(f"Foundation model: {args.foundation_model}")
     print(f"Device: {args.device}")
+    print(f"Clustering method (step 4): {args.clustering_method}")
+    print(f"Initial clusters (step 4): {args.n_clusters}")
+    print(f"Target clusters (step 5): {args.target_n_clusters}")
 
     failed = []
     for ndpi_path in files:
